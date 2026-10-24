@@ -10,8 +10,8 @@ badge app has to be **running with Remote: ON**: open Pin Tester, go to the STAT
 CONFIRM until it says `Remote: ON`. (That switch is deliberate -- with it OFF the badge ignores
 everything, so pins can never change remotely by surprise.)
 
-Needs the [Pin Tester badge app](https://github.com/Corteil/Pin_Tester) at **version 4 or newer**
-(remote protocol 2: `PING`, `DUMP`, `PORT`, `RESET`, `PORTINFO` and the `ANALOG` mode). Install it
+Needs the [Pin Tester badge app](https://github.com/Corteil/Pin_Tester) at **version 4 or newer** (version 5 for the blink high/low timing sliders)
+(remote protocol 2-3: `PING`, `DUMP`, `PORT`, `RESET`, `PORTINFO` and the `ANALOG` mode). Install it
 on the badge first (from the Tildagon app store, or see that repo's README for sideloading); an
 older version will connect but answer `ERR bad command` to the newer commands.
 
@@ -45,7 +45,11 @@ paths in it if you keep the folder elsewhere. Right-click it for *Open with simu
   (and on **Rescan I2C**); otherwise it only refreshes the cheap cached view.
 - **One row per pin** -- live level dot (green high, red low, amber glow for LED/PWM output
   strength), a mode selector, a one-line description, and controls for that mode:
-  - *LED on / off*: brightness slider
+  - *Output*: one dropdown entry with a **Low / High slide switch** (choosing Output starts low)
+  - *Auto*: the badge's OUTPUT: AUTO blink, with separate **high** and **low** time sliders
+    (250 ms - 5 s, log scale)
+  - *LED*: one dropdown entry with an **On / Off slide switch** and a brightness slider (choosing LED
+    starts it off)
   - *LED breathe*: brightness (peak) and cycle time (0.2-10 s)
   - *PWM*: frequency (10 Hz-100 kHz) and duty slider
   - *Analog in*: live voltage readout and bar (0-3.1 V). Offered only on pins that have an ADC
@@ -72,7 +76,8 @@ pintester status                      # just the live levels
 pintester info [--scan]               # hexpansion EEPROM / I2C details  (--json for scripts)
 pintester inspect HS_F                # fresh read-only snapshot
 pintester in LS_C --latch             # input that remembers ever-high / ever-low
-pintester out LS_D on                 # on | off | blink
+pintester out LS_D on                 # on | off
+pintester out LS_D auto 500 1500      # auto (blink): 500 ms high, 1.5 s low (default 250 / 250; 'blink' also works)
 pintester pwm HS_G 5000 70            # 5 kHz, 70 % (frequency snaps to 10,20,50,100... steps)
 pintester led LS_A on 40              # LED at 40 %      (off | on [%] | breathe [seconds])
 pintester led LS_B breathe 1.5
@@ -96,15 +101,16 @@ everything else on the port (REPL noise, tracebacks) is ignored.
 
 | Command | Reply |
 |---|---|
-| `PING` | `PONG proto=2` |
+| `PING` | `PONG proto=3` |
 | `STATUS` | `STATUS LS_A=1 LS_B=0 ...` |
 | `GET <pin>` | `GET <pin> <level>` |
-| `DUMP` | `DUMP port=1 present=1 detect=1 proto=2`, nine `PIN <name> mode=... level=... key=value...` lines, `END` |
+| `DUMP` | `DUMP port=1 present=1 detect=1 proto=3 frame=<ms>`, nine `PIN <name> mode=... level=... key=value...` lines, `END` |
 | `PORTINFO [SCAN]` | `PORTINFO port=.. present=.. detect=.. eeprom=.. files=.. app=.. scan=.. [addr=.. uid=.. size=.. page=.. ver=.. vid=.. pid=..]`, then optional `NAME ...`, `I2C <decimal addrs>`, `SCANERR ...`, `END`; `SCAN` does a fresh I2C bus scan first |
 | `INSPECT [<pin>]` | `INSPECT <pin> func=... dir=... level=... [pull=...]` lines, `END` |
 | `PORT [n]` | `PORT n`, or `OK PORT n` when changing |
 | `RESET` | `OK RESET` |
-| `SET <pin> IN\|LATCH\|OFF\|ON\|AUTO\|INSPECT` | `OK <pin> <mode>` |
+| `SET <pin> IN\|LATCH\|OFF\|ON\|INSPECT` | `OK <pin> <mode>` |
+| `SET <pin> AUTO [hi_ms [lo_ms]]` | blink with the given high / low times (default 250 / 250; resending while blinking updates in place). `DUMP` reports `hi=`, `lo=` and `tog=` (toggle count) |
 | `SET <pin> PWM [hz [duty]]` | HS pins; re-sending while already PWM updates in place |
 | `SET <pin> ANALOG` | HS pins on ports 4-6 only (`ERR ANALOG needs...` otherwise); `GET <pin>` then returns millivolts, and `DUMP` adds `mv=` / `raw=` |
 | `SET <pin> LEDOFF\|LEDON [pct]` | LS pins; `pct` is the brightness setting |
@@ -113,6 +119,14 @@ everything else on the port (REPL noise, tracebacks) is ignored.
 
 ## Notes
 
+- **The blink times can also be set on the badge itself** (OUTPUT: AUTO tile: F picks high/low, UP/DOWN
+  change it); the GUI sliders and the badge buttons edit the same two values.
+- **Blink timing is only accurate from about 250 ms per phase.** The badge redraws its screen
+  between updates and that blocks everything for most of each ~180 ms frame, so shorter high/low
+  times are irregular and short pulses can be missed entirely. Measured on a real badge, edges
+  achieved vs expected: 250/250 ms 99-102 %, 100/100 ms 0-21 %, 20/20 ms 11-14 %. The GUI sliders
+  therefore start at 250 ms; the CLI and protocol accept 10 ms and up but print a warning below 250.
+  For fast square waves on an HS pin use **PWM** (accurate from 10 Hz to 100 kHz).
 - **Analog reconfigures the pin** (unlike *Inspect only*): it puts the pin in analog mode, so don't
   use it on a pin a hexpansion is driving -- the GPS hexpansion on port 5, for example, probably
   uses its HS pins for a serial link. Ports 4 and 5 use ADC2, which the ESP32 can't read reliably

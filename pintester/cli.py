@@ -21,7 +21,7 @@ import time
 from typing import List, Optional
 
 from . import __version__
-from .link import (ALL_PINS, ANALOG_FULL_MV, MODES, PWM_FREQS, Link, LinkError, Pin, Port,
+from .link import (ALL_PINS, ANALOG_FULL_MV, BLINK_MIN_MS, MODES, PWM_FREQS, Link, LinkError, Pin, Port,
                    SerialLink, find_devices, normalise_pin)
 
 RAW_WORDS = ("PING", "STATUS", "GET", "DUMP", "PORTINFO", "INSPECT", "PORT", "RESET", "SET")
@@ -166,7 +166,18 @@ def cmd_in(link, args, out):
 
 
 def cmd_out(link, args, out):
-    link.set_mode(args.pin, {"on": "ON", "off": "OFF", "blink": "AUTO"}[args.state])
+    if args.state in ("auto", "blink"):
+        times = [args.hi] if args.lo is None else [args.hi, args.lo]
+        if any(t < BLINK_MIN_MS for t in times if t is not None):
+            print("note: the badge only keeps accurate blink time down to ~{} ms per phase (its screen "
+                  "redraw blocks everything for most of each frame), so shorter times will be "
+                  "irregular or missed. For fast square waves on an HS pin use 'pwm'.".format(BLINK_MIN_MS),
+                  file=sys.stderr)
+        link.set_mode(args.pin, "AUTO", *([] if args.hi is None else times))
+    else:
+        if args.hi is not None:
+            raise ValueError("high/low times only apply to 'auto' (blink)")
+        link.set_mode(args.pin, {"on": "ON", "off": "OFF"}[args.state])
     print("ok", file=out)
 
 
@@ -304,9 +315,11 @@ def add_commands(sp) -> None:
     p.add_argument("--latch", action="store_true", help="remember ever-high / ever-low")
     p.set_defaults(func=cmd_in)
 
-    p = sp.add_parser("out", help="drive a pin: on, off, or blink (2 Hz)")
+    p = sp.add_parser("out", help="drive a pin: on, off, or auto [HI_MS [LO_MS]] -- the badge's OUTPUT: AUTO blink (default 250/250); 'blink' is an alias")
     pin_arg(p)
-    p.add_argument("state", choices=("on", "off", "blink"))
+    p.add_argument("state", choices=("on", "off", "auto", "blink"))
+    p.add_argument("hi", type=int, nargs="?", help="auto: high time in ms (accurate from ~250; allowed 10-60000)")
+    p.add_argument("lo", type=int, nargs="?", help="auto: low time in ms (default: same as high)")
     p.set_defaults(func=cmd_out)
 
     p = sp.add_parser("pwm", help="hardware PWM on an HS pin")

@@ -10,6 +10,7 @@ All serial traffic happens on a worker thread; the UI thread only draws.
 
 from __future__ import annotations
 
+import math
 import queue
 import threading
 import time
@@ -18,7 +19,8 @@ from tkinter import messagebox, ttk
 from typing import Callable, List, Optional
 
 from . import __version__
-from .link import (ALL_PINS, ANALOG_FULL_MV, BREATHE_MAX_S, BREATHE_MIN_S, HS_PINS, LS_PINS, MODES, PWM_FREQS,
+from .link import (ALL_PINS, ANALOG_FULL_MV, BLINK_DEFAULT_MS, BLINK_MAX_MS, BLINK_MIN_MS, BREATHE_MAX_S,
+                   BREATHE_MIN_S, HS_PINS, LS_PINS, MODES, PWM_FREQS, dropdown_entries, fmt_ms,
                    Link, LinkError, Pin, Port, PortInfo, SerialLink, find_devices, modes_for, pin_kind)
 
 SIMULATOR = "Simulator (demo)"
@@ -52,6 +54,61 @@ def mix(c1: str, c2: str, t: float) -> str:
     a = [int(c1[i:i + 2], 16) for i in (1, 3, 5)]
     b = [int(c2[i:i + 2], 16) for i in (1, 3, 5)]
     return "#" + "".join("{:02x}".format(round(x + (y - x) * t)) for x, y in zip(a, b))
+
+
+def pos_to_ms(pos: float) -> int:
+    """Blink slider position 0-100 -> milliseconds (BLINK_MIN_MS .. BLINK_MAX_MS),
+    on a log scale so both 250 ms and several seconds are easy to hit."""
+    ms = BLINK_MIN_MS * (BLINK_MAX_MS / BLINK_MIN_MS) ** (pos / 100.0)
+    return int(round(ms / 10) * 10) if ms < 1000 else int(round(ms / 50) * 50)
+
+
+def ms_to_pos(ms: float) -> float:
+    ms = max(BLINK_MIN_MS, min(BLINK_MAX_MS, ms))
+    return 100.0 * math.log(ms / BLINK_MIN_MS) / math.log(BLINK_MAX_MS / BLINK_MIN_MS)
+
+
+class ToggleSwitch(tk.Canvas):
+    """A small on/off slide switch. ``command(is_on)`` is called when the
+    user flips it; ``set()`` updates it silently (no command)."""
+
+    W, H = 48, 24
+
+    def __init__(self, parent, bg: str, command: Callable[[bool], None]):
+        super().__init__(parent, width=self.W, height=self.H, bg=bg, highlightthickness=0, cursor="hand2")
+        self.command = command
+        self.on = False
+        self.enabled = True
+        self.bind("<Button-1>", self._clicked)
+        self._draw()
+
+    def _draw(self) -> None:
+        self.delete("all")
+        track = C["green"] if self.on else C["off"]
+        if not self.enabled:
+            track = mix(track, C["bg"], 0.55)
+        h, w = self.H, self.W
+        self.create_oval(1, 1, h - 1, h - 1, fill=track, outline="")
+        self.create_oval(w - h + 1, 1, w - 1, h - 1, fill=track, outline="")
+        self.create_rectangle(h // 2, 1, w - h // 2, h - 1, fill=track, outline="")
+        x = w - h + 3 if self.on else 3
+        self.create_oval(x, 3, x + h - 6, h - 3, fill=C["text"] if self.enabled else C["muted"], outline="")
+
+    def _clicked(self, _event) -> None:
+        if self.enabled:
+            self.on = not self.on
+            self._draw()
+            self.command(self.on)
+
+    def set(self, on: bool) -> None:
+        if on != self.on:
+            self.on = on
+            self._draw()
+
+    def set_enabled(self, enabled: bool) -> None:
+        self.enabled = enabled
+        self.configure(cursor="hand2" if enabled else "arrow")
+        self._draw()
 
 
 # ---------------------------------------------------------------------------
@@ -214,13 +271,14 @@ class PinRow(ttk.Frame):
         self.ctl.grid(row=0, column=4, sticky="e", padx=(0, 12))
         self._build_controls(shade)
         self._build_analog(shade)
+        self._build_out_blink(shade)
         self.set_editable(False)   # starts as inspect only
 
     def _set_mode_list(self, analog_ok: bool) -> None:
-        words = [w for w in modes_for(self.kind) if w != "ANALOG" or analog_ok]
+        entries = dropdown_entries(self.kind, analog_ok)
         self.analog_ok = analog_ok
-        self.words = {MODES[w][0]: w for w in words}
-        self.mode_box.configure(values=[MODES[w][0] for w in words])
+        self.words = {label: word for label, word in entries}
+        self.mode_box.configure(values=[label for label, _word in entries])
 
     # -- controls ------------------------------------------------------
     def _scale(self, parent, lo, hi, var, command, width=150):
@@ -238,6 +296,8 @@ class PinRow(ttk.Frame):
         self.freq_box.configure(state=state)
         for scale in self._scales:
             scale.state(["!disabled"] if editable else ["disabled"])
+        self.out_switch.set_enabled(editable)
+        self.led_switch.set_enabled(editable)
 
     def _build_controls(self, shade):
         st = "Row{}.TFrame".format(shade)
@@ -246,17 +306,23 @@ class PinRow(ttk.Frame):
         self.f_led = ttk.Frame(self.ctl, style=st)
         self.bright_var = tk.DoubleVar(value=50)
         self.period_var = tk.DoubleVar(value=2.0)
-        ttk.Label(self.f_led, text="brightness", style=lbl).grid(row=0, column=0, padx=(0, 6))
-        self._scale(self.f_led, 0, 100, self.bright_var, self._values_changed).grid(row=0, column=1)
+        led_bg = C["row"] if shade == 0 else C["row_alt"]
+        # on/off switch (for the single "LED" entry; hidden while breathing)
+        self.led_switch = ToggleSwitch(self.f_led, led_bg, self._led_switch_flipped)
+        self.led_switch.grid(row=0, column=0, padx=(0, 6))
+        self.led_txt = ttk.Label(self.f_led, text="Off", style="Name{}.TLabel".format(shade), width=4)
+        self.led_txt.grid(row=0, column=1, padx=(0, 14))
+        ttk.Label(self.f_led, text="brightness", style=lbl).grid(row=0, column=2, padx=(0, 6))
+        self._scale(self.f_led, 0, 100, self.bright_var, self._values_changed).grid(row=0, column=3)
         self.bright_txt = ttk.Label(self.f_led, text="50%", style=lbl, width=5)
-        self.bright_txt.grid(row=0, column=2, padx=(4, 12))
+        self.bright_txt.grid(row=0, column=4, padx=(4, 12))
         self.period_lbl = ttk.Label(self.f_led, text="cycle", style=lbl)
-        self.period_lbl.grid(row=0, column=3, padx=(0, 6))
+        self.period_lbl.grid(row=0, column=5, padx=(0, 6))
         self.period_scale = self._scale(self.f_led, BREATHE_MIN_S, BREATHE_MAX_S, self.period_var,
                                         self._values_changed, 130)
-        self.period_scale.grid(row=0, column=4)
+        self.period_scale.grid(row=0, column=6)
         self.period_txt = ttk.Label(self.f_led, text="2.0 s", style=lbl, width=6)
-        self.period_txt.grid(row=0, column=5, padx=(4, 0))
+        self.period_txt.grid(row=0, column=7, padx=(4, 0))
         # PWM (HS pins)
         self.f_pwm = ttk.Frame(self.ctl, style=st)
         self.freq_var = tk.StringVar(value=freq_label(1000))
@@ -270,6 +336,42 @@ class PinRow(ttk.Frame):
         self._scale(self.f_pwm, 0, 100, self.duty_var, self._values_changed).grid(row=0, column=3)
         self.duty_txt = ttk.Label(self.f_pwm, text="50%", style=lbl, width=5)
         self.duty_txt.grid(row=0, column=4, padx=(4, 0))
+
+    def _build_out_blink(self, shade):
+        st = "Row{}.TFrame".format(shade)
+        lbl = "Info{}.TLabel".format(shade)
+        bg = C["row"] if shade == 0 else C["row_alt"]
+        # Output: one switch for the level
+        self.f_out = ttk.Frame(self.ctl, style=st)
+        ttk.Label(self.f_out, text="level", style=lbl).grid(row=0, column=0, padx=(0, 8))
+        self.out_switch = ToggleSwitch(self.f_out, bg, self._switch_flipped)
+        self.out_switch.grid(row=0, column=1)
+        self.out_txt = ttk.Label(self.f_out, text="Low", style="Name{}.TLabel".format(shade), width=5)
+        self.out_txt.grid(row=0, column=2, padx=(8, 0))
+        # Blink: separate high and low times
+        self.f_blink = ttk.Frame(self.ctl, style=st)
+        self.hi_pos = tk.DoubleVar(value=ms_to_pos(BLINK_DEFAULT_MS))
+        self.lo_pos = tk.DoubleVar(value=ms_to_pos(BLINK_DEFAULT_MS))
+        ttk.Label(self.f_blink, text="high", style=lbl).grid(row=0, column=0, padx=(0, 6))
+        self._scale(self.f_blink, 0, 100, self.hi_pos, self._values_changed, 95).grid(row=0, column=1)
+        self.hi_txt = ttk.Label(self.f_blink, text="250 ms", style=lbl, width=6)
+        self.hi_txt.grid(row=0, column=2, padx=(4, 10))
+        ttk.Label(self.f_blink, text="low", style=lbl).grid(row=0, column=3, padx=(0, 6))
+        self._scale(self.f_blink, 0, 100, self.lo_pos, self._values_changed, 95).grid(row=0, column=4)
+        self.lo_txt = ttk.Label(self.f_blink, text="250 ms", style=lbl, width=6)
+        self.lo_txt.grid(row=0, column=5, padx=(4, 0))
+        ttk.Label(self.f_blink, text="250 ms \u2013 5 s", style=lbl).grid(row=0, column=6, padx=(8, 0))
+
+    def _switch_flipped(self, on: bool) -> None:
+        self._touch()
+        self.out_txt.config(text="High" if on else "Low")
+        self.send_values(self.name, "ON" if on else "OFF", ())
+
+    def _led_switch_flipped(self, on: bool) -> None:
+        self._touch()
+        self.led_txt.config(text="On" if on else "Off")
+        word = "LEDON" if on else "LEDOFF"
+        self.send_values(self.name, word, self._current_args(word))
 
     def _build_analog(self, shade):
         bg = C["row"] if shade == 0 else C["row_alt"]
@@ -286,7 +388,7 @@ class PinRow(ttk.Frame):
         if family == self._family:
             return
         self._family = family
-        for frame in (self.f_led, self.f_pwm, self.f_analog):
+        for frame in (self.f_led, self.f_pwm, self.f_analog, self.f_out, self.f_blink):
             frame.grid_remove()
         if family == "led":
             self.f_led.grid(row=0, column=0, sticky="w")
@@ -294,15 +396,44 @@ class PinRow(ttk.Frame):
             self.f_pwm.grid(row=0, column=0, sticky="w")
         elif family == "analog":
             self.f_analog.grid(row=0, column=0, sticky="w")
+        elif family == "out":
+            self.f_out.grid(row=0, column=0, sticky="w")
+        elif family == "blink":
+            self.f_blink.grid(row=0, column=0, sticky="w")
 
     # -- user input ----------------------------------------------------
     def _touch(self) -> None:
         self._hold_until = time.monotonic() + self.HOLD_S
 
+    _FAMILY = {"LEDOFF": "led", "LEDON": "led", "BREATHE": "led", "PWM": "pwm", "ANALOG": "analog",
+               "ON": "out", "OFF": "out", "AUTO": "blink"}
+
+    def _apply_family(self, word: str) -> None:
+        """Show the controls that belong to a mode right away (don't wait for
+        the badge's next reply, which is ignored for a moment after an edit)."""
+        family = self._FAMILY.get(word)
+        self._show_family(family)
+        if family == "led":
+            self._led_layout(word == "BREATHE")
+
+    def _led_layout(self, breathing: bool) -> None:
+        """Breathe shows the cycle slider; plain LED shows the on/off switch."""
+        for w in (self.period_lbl, self.period_scale, self.period_txt):
+            w.grid() if breathing else w.grid_remove()
+        for w in (self.led_switch, self.led_txt):
+            w.grid_remove() if breathing else w.grid()
+
     def _mode_chosen(self, _event=None) -> None:
         self._touch()
         word = self.words[self.mode_var.get()]
         self.mode_box.selection_clear()
+        self._apply_family(word)
+        if word == "OFF":                      # "Output" always starts low
+            self.out_switch.set(False)
+            self.out_txt.config(text="Low")
+        elif word == "LEDOFF":                 # "LED" always starts off
+            self.led_switch.set(False)
+            self.led_txt.config(text="Off")
         self.send_mode(self.name, word, self._current_args(word))
 
     def _current_args(self, word: str) -> tuple:
@@ -310,6 +441,8 @@ class PinRow(ttk.Frame):
             return (round(self.bright_var.get()),)
         if word == "BREATHE":
             return (round(self.period_var.get() * 10), round(self.bright_var.get()))
+        if word == "AUTO":
+            return (pos_to_ms(self.hi_pos.get()), pos_to_ms(self.lo_pos.get()))
         if word == "PWM":
             hz = PWM_FREQS[[freq_label(f) for f in PWM_FREQS].index(self.freq_var.get())]
             return (hz, round(self.duty_var.get()))
@@ -320,6 +453,8 @@ class PinRow(ttk.Frame):
         self.bright_txt.config(text="{}%".format(round(self.bright_var.get())))
         self.period_txt.config(text="{:.1f} s".format(round(self.period_var.get() * 10) / 10))
         self.duty_txt.config(text="{}%".format(round(self.duty_var.get())))
+        self.hi_txt.config(text=fmt_ms(pos_to_ms(self.hi_pos.get())))
+        self.lo_txt.config(text=fmt_ms(pos_to_ms(self.lo_pos.get())))
         if self._after_id is not None:
             self.after_cancel(self._after_id)
         self._after_id = self.after(70, self._flush_values)
@@ -327,7 +462,9 @@ class PinRow(ttk.Frame):
     def _flush_values(self) -> None:
         self._after_id = None
         word = self.words.get(self.mode_var.get())
-        if word in ("LEDON", "LEDOFF", "BREATHE", "PWM"):
+        if word == "LEDOFF":                   # the "LED" entry: on or off depends on the switch
+            word = "LEDON" if self.led_switch.on else "LEDOFF"
+        if word in ("LEDON", "LEDOFF", "BREATHE", "PWM", "AUTO"):
             self.send_values(self.name, word, self._current_args(word))
 
     # -- state from the badge ------------------------------------------
@@ -336,6 +473,10 @@ class PinRow(ttk.Frame):
         """What the dropdown shows. For an inspect-only pin that's what the
         pin turned out to be (output, input, PWM, peripheral...), so the box
         reflects the pin's real type; otherwise the mode you set."""
+        if pin.mode in ("ON", "OFF"):
+            return "Output"            # one entry; the switch shows the level
+        if pin.mode in ("LEDON", "LEDOFF"):
+            return "LED"               # one entry; the switch shows on/off
         if pin.mode != "INSPECT":
             return MODES.get(pin.mode, (pin.mode,))[0]
         func, direction = pin.fields.get("func"), pin.fields.get("dir")
@@ -386,20 +527,36 @@ class PinRow(ttk.Frame):
             self._show_family("led")
             self.bright_var.set(f.get("bright", 50))
             self.period_var.set(f.get("period", 2000) / 1000.0)
-            show_period = pin.mode == "BREATHE"
-            for w in (self.period_lbl, self.period_scale, self.period_txt):
-                w.grid() if show_period else w.grid_remove()
+            self._led_layout(pin.mode == "BREATHE")
+            self.led_switch.set(pin.mode == "LEDON")
+            self.led_txt.config(text="On" if pin.mode == "LEDON" else "Off")
         elif pin.mode == "PWM":
             self._show_family("pwm")
             self.freq_var.set(freq_label(f.get("freq", 1000)))
             self.duty_var.set(f.get("duty", 50))
         elif pin.mode == "ANALOG":
             self._show_family("analog")
+        elif pin.mode in ("ON", "OFF"):
+            self._show_family("out")
+            self.out_switch.set(pin.mode == "ON")
+            self.out_txt.config(text="High" if pin.mode == "ON" else "Low")
+        elif pin.mode == "AUTO":
+            self._show_family("blink")
+            self.hi_pos.set(ms_to_pos(f.get("hi", BLINK_DEFAULT_MS)))
+            self.lo_pos.set(ms_to_pos(f.get("lo", BLINK_DEFAULT_MS)))
         else:
             self._show_family(None)
         self.bright_txt.config(text="{}%".format(round(self.bright_var.get())))
         self.period_txt.config(text="{:.1f} s".format(self.period_var.get()))
         self.duty_txt.config(text="{}%".format(round(self.duty_var.get())))
+        self.hi_txt.config(text=fmt_ms(pos_to_ms(self.hi_pos.get())))
+        self.lo_txt.config(text=fmt_ms(pos_to_ms(self.lo_pos.get())))
+        if pin.mode == "AUTO":
+            # the badge's real times win over the slider labels if they're outside the slider's range
+            for key, label in (("hi", self.hi_txt), ("lo", self.lo_txt)):
+                actual = f.get(key)
+                if actual is not None and not BLINK_MIN_MS <= actual <= BLINK_MAX_MS:
+                    label.config(text=fmt_ms(actual))
 
 
 # ---------------------------------------------------------------------------

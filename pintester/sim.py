@@ -30,7 +30,7 @@ class SimBadge:
     def reset(self) -> None:
         self.state = {
             name: {"mode": self._default_mode(), "user": 0, "bright": 50, "period": 2000,
-                   "freq": 1000, "duty": 50}
+                   "freq": 1000, "duty": 50, "hi": 250, "lo": 250}
             for name in ALL_PINS
         }
 
@@ -45,7 +45,8 @@ class SimBadge:
         if mode == "ON":
             return 1
         if mode == "AUTO":
-            return int(t * 4) % 2
+            cycle = (st["hi"] + st["lo"]) / 1000.0
+            return 1 if (t % cycle) < st["hi"] / 1000.0 else 0
         if mode == "LEDOFF":
             return 0
         if mode == "LEDON":
@@ -144,6 +145,9 @@ class SimBadge:
                 st["freq"] = min(PWM_FREQS, key=lambda f: abs(f - n))
                 if len(parts) >= 5:
                     st["duty"] = max(0, min(100, int(parts[4])))
+            elif word == "AUTO":
+                st["hi"] = max(10, min(60000, n))
+                st["lo"] = max(10, min(60000, int(parts[4]))) if len(parts) >= 5 else st["hi"]
             elif word == "BREATHE":
                 st["period"] = max(200, min(10000, n * 100))
                 if len(parts) >= 5:
@@ -164,7 +168,7 @@ class SimBadge:
 
     def _dump(self) -> List[str]:
         present = self.port in self.populated
-        out = ["DUMP port={} present={} detect={} proto={}".format(
+        out = ["DUMP port={} present={} detect={} proto={} frame=230".format(
             self.port, int(present), int(present), PROTOCOL)]
         for name in ALL_PINS:
             st = self.state[name]
@@ -176,6 +180,8 @@ class SimBadge:
             if mode == "INSPECT":
                 info = self._inspect(name)
                 f += ["{}={}".format(k, info[k]) for k in ("func", "dir", "pull") if k in info]
+            elif mode == "AUTO":
+                f += ["hi={}".format(st["hi"]), "lo={}".format(st["lo"]), "tog=0"]
             elif mode == "ANALOG":
                 f += ["mv={}".format(level), "raw={}".format(level * 65535 // 3100)]
             elif mode == "LATCH":

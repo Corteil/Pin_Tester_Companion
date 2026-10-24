@@ -23,7 +23,7 @@ except ImportError:  # pragma: no cover - reported when you try to connect
     serial = None
     list_ports = None
 
-PROTOCOL = 2
+PROTOCOL = 3
 
 LS_PINS = ("LS_A", "LS_B", "LS_C", "LS_D", "LS_E")
 HS_PINS = ("HS_F", "HS_G", "HS_H", "HS_I")
@@ -41,7 +41,7 @@ MODES = {
     "LATCH": ("Latched input", ("ls", "hs")),
     "OFF": ("Output low", ("ls", "hs")),
     "ON": ("Output high", ("ls", "hs")),
-    "AUTO": ("Blink 2 Hz", ("ls", "hs")),
+    "AUTO": ("Auto", ("ls", "hs")),       # blinks; the badge calls this mode OUTPUT: AUTO
     "LEDOFF": ("LED off", ("ls",)),
     "LEDON": ("LED on", ("ls",)),
     "BREATHE": ("LED breathe", ("ls",)),
@@ -49,6 +49,29 @@ MODES = {
     "ANALOG": ("Analog in", ("hs",)),   # only HS pins on ports 4-6 (see Pin.adc)
 }
 ANALOG_FULL_MV = 3100   # the ADC's usable range on the badge (~0-3.1 V)
+# Blink high/low range offered by the GUI. The badge keeps accurate time from about 250 ms per phase
+# upwards; shorter is unreliable because its screen redraw blocks everything for most of each ~180 ms
+# frame (measured: 250/250 ms gives 99-102% of the expected edges, 100/100 ms gives 0-21%, 20/20 ms
+# 11-14%). The protocol itself accepts 10 ms - 60 s; for fast square waves on an HS pin use PWM.
+BLINK_MIN_MS, BLINK_MAX_MS, BLINK_DEFAULT_MS = 250, 5000, 250
+
+
+def fmt_ms(ms) -> str:
+    return "{:g} s".format(ms / 1000) if ms >= 1000 else "{} ms".format(int(ms))
+
+
+def dropdown_entries(kind: str, analog_ok: bool = False) -> List[tuple]:
+    """(label, protocol word) for a pin's mode dropdown. Output high/low is a
+    single "Output" entry and LED on/off a single "LED" entry (a toggle switch
+    picks the state), so ON and LEDON are left out and OFF / LEDOFF stand for
+    them (selecting one starts off/low, the safe state)."""
+    entries = []
+    for word in modes_for(kind):
+        if word in ("ON", "LEDON") or (word == "ANALOG" and not analog_ok):
+            continue
+        label = {"OFF": "Output", "LEDOFF": "LED"}.get(word, MODES[word][0])
+        entries.append((label, word))
+    return entries
 
 
 def modes_for(kind: str) -> List[str]:
@@ -124,7 +147,9 @@ class Pin:
         if self.mode in ("OFF", "ON"):
             return "driving " + ("HIGH" if self.mode == "ON" else "LOW")
         if self.mode == "AUTO":
-            return "blinking, now " + hl
+            if f.get("hi") is None:
+                return "auto (blink), now " + hl
+            return "auto: {} high / {} low  (now {})".format(fmt_ms(f["hi"]), fmt_ms(f["lo"]), hl)
         if self.mode in ("LEDOFF", "LEDON", "BREATHE"):
             out = f.get("out")
             txt = "set {}%".format(f.get("bright", "?"))
@@ -144,6 +169,7 @@ class Port:
     present: bool = False
     detect: Optional[bool] = None
     proto: int = 0
+    frame_ms: Optional[int] = None     # badge's average time between app updates
     pins: List[Pin] = field(default_factory=list)
 
     def pin(self, name: str) -> Pin:
@@ -255,6 +281,7 @@ def parse_dump(lines: List[str]) -> Port:
             det = kv.get("detect")
             port.detect = None if det is None else bool(det)
             port.proto = int(kv.get("proto", 1))
+            port.frame_ms = kv.get("frame")
         elif parts[0] == "PIN" and len(parts) >= 2:
             kv = parse_kv(parts[2:])
             mode = str(kv.pop("mode", "INSPECT"))

@@ -79,6 +79,66 @@ class PortInfoParsing(unittest.TestCase):
         self.assertIsNone(link.portinfo().name)
 
 
+class OutputAndBlink(unittest.TestCase):
+    def test_dropdown_has_single_output_entry(self):
+        from pintester.link import dropdown_entries
+        for kind in ("ls", "hs"):
+            labels = [label for label, _word in dropdown_entries(kind)]
+            self.assertEqual(labels.count("Output"), 1)
+            self.assertNotIn("Output high", labels)
+            self.assertNotIn("Output low", labels)
+        words = dict(dropdown_entries("ls"))
+        self.assertEqual(words["Output"], "OFF")          # starts low, switch changes it
+        self.assertEqual(words["LED"], "LEDOFF")            # one LED entry; a switch turns it on
+        self.assertIn("LED breathe", words)
+        self.assertNotIn("LED on", words)
+        self.assertNotIn("LED off", words)
+        self.assertNotIn("PWM", words)
+        hs = dict(dropdown_entries("hs"))
+        self.assertIn("PWM", hs)
+        self.assertNotIn("Analog in", hs)
+        self.assertIn("Analog in", dict(dropdown_entries("hs", analog_ok=True)))
+
+    def test_blink_timings_roundtrip(self):
+        link = SimLink(latency=0)
+        link.set_mode("LS_A", "AUTO", 100, 400)
+        pin = link.dump().pin("LS_A")
+        self.assertEqual((pin.mode, pin.fields["hi"], pin.fields["lo"]), ("AUTO", 100, 400))
+        self.assertIn("100 ms high / 400 ms low", pin.describe())
+        self.assertEqual(pin.mode_label, "Auto")
+        link.set_mode("LS_A", "AUTO", 2000)               # low defaults to the high time
+        self.assertEqual(link.dump().pin("LS_A").fields["lo"], 2000)
+
+    def test_cli_blink(self):
+        import contextlib
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            self.assertEqual(cli.main(["--sim", "out", "LS_A", "auto", "100", "400"]), 0)
+            self.assertEqual(cli.main(["--sim", "out", "LS_A", "blink", "100", "400"]), 0)   # alias
+            self.assertEqual(cli.main(["--sim", "out", "LS_A", "on", "100"]), 1)
+        self.assertIn("only apply to 'auto'", err.getvalue())
+
+    def test_short_blink_warns(self):
+        import contextlib
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            self.assertEqual(cli.main(["--sim", "out", "LS_A", "blink", "100", "100"]), 0)   # allowed...
+        self.assertIn("accurate blink time", err.getvalue())                                   # ...but warned
+        err2 = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err2):
+            cli.main(["--sim", "out", "LS_A", "blink", "250", "500"])
+        self.assertEqual(err2.getvalue(), "")
+
+    def test_gui_slider_range(self):
+        # the helpers don't need a display; skip if tkinter isn't importable
+        try:
+            from pintester import gui
+        except Exception:
+            self.skipTest("tkinter unavailable")
+        self.assertEqual((gui.pos_to_ms(0), gui.pos_to_ms(100)), (250, 5000))
+        self.assertAlmostEqual(gui.ms_to_pos(gui.pos_to_ms(37)), 37, delta=3)
+
+
 class Analog(unittest.TestCase):
     def test_parse_and_describe(self):
         port = parse_dump(["DUMP port=6 present=0 detect=0 proto=2",
@@ -122,7 +182,7 @@ class Simulator(unittest.TestCase):
         self.link = SimLink(latency=0)
 
     def test_roundtrip(self):
-        self.assertEqual(self.link.ping(), 2)
+        self.assertEqual(self.link.ping(), 3)
         self.assertEqual(self.link.port(), 1)
         self.link.set_mode("HS_G", "PWM", 5000, 70)
         pin = self.link.dump().pin("HS_G")
