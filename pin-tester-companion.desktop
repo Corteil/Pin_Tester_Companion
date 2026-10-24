@@ -1,0 +1,17 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Pin Tester
+GenericName=Hexpansion pin tester
+Comment=Control and inspect the Tildagon badge's hexpansion pins over USB
+Exec=/home/pi/Code/Pin_Tester_Companion/pintester.sh gui
+Icon=/home/pi/Code/Pin_Tester_Companion/pintester/icon.png
+Terminal=false
+Categories=Development;Electronics;
+Keywords=badge;tildagon;hexpansion;gpio;pwm;
+StartupNotify=false
+Actions=Simulator;
+
+[Desktop Action Simulator]
+Name=Open with simulated badge (demo)
+Exec=/home/pi/Code/Pin_Tester_Companion/pintester.sh --sim gui

@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pintester-companion"
+version = "1.0.0"
+description = "Desktop GUI and command-line control for the Pin Tester Tildagon badge app"
+requires-python = ">=3.9"
+dependencies = ["pyserial>=3.4"]
+
+[project.scripts]
+pintester = "pintester.cli:main"
+
+[tool.setuptools]
+packages = ["pintester"]
