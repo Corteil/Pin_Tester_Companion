@@ -10,8 +10,10 @@ badge app has to be **running with Remote: ON**: open Pin Tester, go to the STAT
 CONFIRM until it says `Remote: ON`. (That switch is deliberate -- with it OFF the badge ignores
 everything, so pins can never change remotely by surprise.)
 
-Needs the badge app from `main` at version 3 or newer with protocol 2 (the `DUMP`, `PORT`,
-`RESET`, `PING` commands).
+Needs the [Pin Tester badge app](https://github.com/Corteil/Pin_Tester) at **version 4 or newer**
+(remote protocol 2: `PING`, `DUMP`, `PORT`, `RESET`, `PORTINFO` and the `ANALOG` mode). Install it
+on the badge first (from the Tildagon app store, or see that repo's README for sideloading); an
+older version will connect but answer `ERR bad command` to the newer commands.
 
 ## Install
 
